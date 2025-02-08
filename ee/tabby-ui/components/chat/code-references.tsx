@@ -18,7 +18,7 @@ import {
 import { IconExternalLink, IconFile, IconFileSearch2 } from '../ui/icons'
 
 interface ContextReferencesProps {
-  isInEditor?: boolean
+  supportsOpenInEditor?: boolean
   contexts: RelevantCodeContext[]
   clientContexts?: RelevantCodeContext[]
   className?: string
@@ -32,6 +32,7 @@ interface ContextReferencesProps {
   highlightIndex?: number | undefined
   showExternalLink: boolean
   showClientCodeIcon: boolean
+  title?: React.ReactNode
 }
 
 export const CodeReferences = forwardRef<
@@ -50,7 +51,8 @@ export const CodeReferences = forwardRef<
       highlightIndex,
       showExternalLink,
       showClientCodeIcon,
-      isInEditor
+      supportsOpenInEditor,
+      title
     },
     ref
   ) => {
@@ -70,8 +72,6 @@ export const CodeReferences = forwardRef<
       }
     }, [ctxLen])
 
-    if (totalContextLength === 0) return null
-
     return (
       <Accordion
         type="single"
@@ -85,9 +85,13 @@ export const CodeReferences = forwardRef<
           <AccordionTrigger
             className={cn('my-0 py-2 font-semibold', triggerClassname)}
           >
-            <span className="mr-2">{`Read ${totalContextLength} file${
-              isMultipleReferences ? 's' : ''
-            }`}</span>
+            {title ? (
+              title
+            ) : (
+              <span className="mr-2">{`Read ${totalContextLength} file${
+                isMultipleReferences ? 's' : ''
+              }`}</span>
+            )}
           </AccordionTrigger>
           <AccordionContent className="space-y-2">
             {clientContexts?.map((item, index) => {
@@ -97,7 +101,7 @@ export const CodeReferences = forwardRef<
                   context={item}
                   onContextClick={ctx => onContextClick?.(ctx, true)}
                   isHighlighted={highlightIndex === index}
-                  clickable={isInEditor || !!item.git_url}
+                  clickable={supportsOpenInEditor}
                   showClientCodeIcon={showClientCodeIcon}
                 />
               )
