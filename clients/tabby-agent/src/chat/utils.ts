@@ -231,7 +231,6 @@ export async function showDocument(params: ShowDocumentParams, lspConnection: Co
 // [+] inserted
 // [-] deleted
 // [>] footer
-// [x] stopped
 // footer line
 // >>>>>>> End of changes
 export function generateChangesPreview(edit: Edit): string[] {
@@ -301,7 +300,7 @@ export function generateChangesPreview(edit: Edit): string[] {
     }
     if (inProgressChunk && lastDiff) {
       if (edit.state === "stopped") {
-        pushDiffValue(lastDiff.value, "x");
+        pushDiffValue(lastDiff.value, "+");
       } else {
         pushDiffValue(lastDiff.value, "|");
       }
@@ -312,7 +311,7 @@ export function generateChangesPreview(edit: Edit): string[] {
         break;
       }
       if (edit.state === "stopped") {
-        pushDiffValue(diff.value, "x");
+        pushDiffValue(diff.value, "=");
       } else {
         pushDiffValue(diff.value, ".");
       }
@@ -362,4 +361,18 @@ export function getCommentPrefix(languageId: string) {
     return "//";
   }
   return "";
+}
+
+export function truncateFileContent(content: string, maxLength: number): string {
+  if (content.length <= maxLength) {
+    return content;
+  }
+
+  content = content.slice(0, maxLength);
+  const lastNewLine = content.lastIndexOf("\n");
+  if (lastNewLine > 0) {
+    content = content.slice(0, lastNewLine + 1);
+  }
+
+  return content;
 }

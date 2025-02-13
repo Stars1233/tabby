@@ -105,3 +105,13 @@ const enableDeveloperModeFactory = new ExperimentFlagFactory(
 export const EXP_enable_developer_mode =
   enableDeveloperModeFactory.defineGlobalVar()
 export const useEnableDeveloperMode = enableDeveloperModeFactory.defineHook()
+
+const enablePageFactory = new ExperimentFlagFactory(
+  'enable_page',
+  'Page',
+  'Enable Page. This feature allows you to convert threads to page.',
+  false
+)
+
+export const EXP_enable_page = enablePageFactory.defineGlobalVar()
+export const useEnablePage = enablePageFactory.defineHook()

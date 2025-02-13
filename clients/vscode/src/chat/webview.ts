@@ -14,6 +14,9 @@ import {
   ProgressLocation,
   Location,
   LocationLink,
+  TabInputText,
+  SymbolInformation,
+  DocumentSymbol,
 } from "vscode";
 import { TABBY_CHAT_PANEL_API_VERSION } from "tabby-chat-panel";
 import type {
@@ -26,15 +29,23 @@ import type {
   FileLocation,
   GitRepository,
   EditorFileContext,
+  ListFilesInWorkspaceParams,
+  ListFileItem,
+  FileRange,
+  Filepath,
+  ListSymbolsParams,
+  ListSymbolItem,
 } from "tabby-chat-panel";
 import * as semver from "semver";
+import debounce from "debounce";
+import { v4 as uuid } from "uuid";
 import type { StatusInfo, Config } from "tabby-agent";
 import type { GitProvider } from "../git/GitProvider";
-import type { Client as LspClient } from "../lsp/Client";
+import type { Client as LspClient } from "../lsp/client";
 import { createClient } from "./createClient";
 import { isBrowser } from "../env";
 import { getLogger } from "../logger";
-import { getFileContextFromSelection } from "./fileContext";
+import { getEditorContext } from "./context";
 import {
   localUriToChatPanelFilepath,
   chatPanelFilepathToLocalUri,
@@ -42,7 +53,11 @@ import {
   vscodeRangeToChatPanelPositionRange,
   chatPanelLocationToVSCodeRange,
   isValidForSyncActiveEditorSelection,
+  localUriToListFileItem,
+  vscodeRangeToChatPanelLineRange,
 } from "./utils";
+import { caseInsensitivePattern, findFiles } from "../findFiles";
+import { wrapCancelableFunction } from "../cancelableFunction";
 import mainHtml from "./html/main.html";
 import errorHtml from "./html/error.html";
 
@@ -70,8 +85,11 @@ export class ChatWebview {
   // A number to ensure the html is reloaded when assigned a new value
   private reloadCount = 0;
 
-  // A callback list for `isFocused` method
-  private pendingFocusCheckCallbacks: ((focused: boolean) => void)[] = [];
+  // A callback list for invoke javascript function by postMessage
+  private pendingCallbacks = new Map<string, (...arg: unknown[]) => void>();
+
+  // Store the chat state to be reload when webview is reloaded
+  private sessionStateMap = new Map<string, Record<string, unknown>>();
 
   constructor(
     private readonly context: ExtensionContext,
@@ -102,14 +120,14 @@ export class ChatWebview {
     this.disposables.push(
       window.onDidChangeActiveTextEditor((editor) => {
         if (this.chatPanelLoaded) {
-          this.notifyActiveEditorSelectionChange(editor);
+          this.debouncedNotifyActiveEditorSelectionChange(editor);
         }
       }),
     );
     this.disposables.push(
       window.onDidChangeTextEditorSelection((event) => {
         if (event.textEditor === window.activeTextEditor && this.chatPanelLoaded) {
-          this.notifyActiveEditorSelectionChange(event.textEditor);
+          this.debouncedNotifyActiveEditorSelectionChange(event.textEditor);
         }
       }),
     );
@@ -135,9 +153,9 @@ export class ChatWebview {
             this.client?.updateTheme(event.style, this.getColorThemeString());
             return;
           }
-          case "checkFocusedResult": {
-            this.pendingFocusCheckCallbacks.forEach((cb) => cb(event.focused));
-            this.pendingFocusCheckCallbacks = [];
+          case "jsCallback": {
+            this.pendingCallbacks.get(event.id)?.(...event.args);
+            this.pendingCallbacks.delete(event.id);
             return;
           }
         }
@@ -164,8 +182,11 @@ export class ChatWebview {
       return false;
     }
     return new Promise((resolve) => {
-      webview.postMessage({ action: "checkFocused" });
-      this.pendingFocusCheckCallbacks.push(resolve);
+      const id = uuid();
+      this.pendingCallbacks.set(id, (...args) => {
+        resolve(args[0] as boolean);
+      });
+      webview.postMessage({ id, action: "checkFocused" });
     });
   }
 
@@ -461,8 +482,241 @@ export class ChatWebview {
           return null;
         }
 
-        const fileContext = await getFileContextFromSelection(editor, this.gitProvider);
-        return fileContext;
+        return await getEditorContext(editor, this.gitProvider);
+      },
+
+      fetchSessionState: async (keys?: string[] | undefined): Promise<Record<string, unknown> | null> => {
+        const sessionStateKey = this.currentConfig?.endpoint ?? "";
+        const sessionState = this.sessionStateMap.get(sessionStateKey) ?? {};
+
+        if (!keys) {
+          return { ...sessionState };
+        }
+
+        const filtered: Record<string, unknown> = {};
+        for (const key of keys) {
+          if (key in sessionState) {
+            filtered[key] = sessionState[key];
+          }
+        }
+        return filtered;
+      },
+
+      storeSessionState: async (state: Record<string, unknown>) => {
+        const sessionStateKey = this.currentConfig?.endpoint ?? "";
+        const sessionState = this.sessionStateMap.get(sessionStateKey) ?? {};
+        this.sessionStateMap.set(sessionStateKey, {
+          ...sessionState,
+          ...state,
+        });
+      },
+
+      listFileInWorkspace: async (params: ListFilesInWorkspaceParams): Promise<ListFileItem[]> => {
+        const maxResults = params.limit || 50;
+        const searchQuery = params.query?.trim();
+
+        if (!searchQuery) {
+          const openTabs = window.tabGroups.all
+            .flatMap((group) => group.tabs)
+            .filter((tab) => tab.input && (tab.input as TabInputText).uri);
+
+          this.logger.info(`No query provided, listing ${openTabs.length} opened editors.`);
+          return openTabs.map((tab) => localUriToListFileItem((tab.input as TabInputText).uri, this.gitProvider));
+        }
+
+        try {
+          const globPattern = caseInsensitivePattern(searchQuery);
+          this.logger.info(`Searching files with pattern: ${globPattern}, limit: ${maxResults}`);
+          const files = await this.findFiles(globPattern, { maxResults });
+          this.logger.info(`Found ${files.length} files.`);
+          return files.map((uri) => localUriToListFileItem(uri, this.gitProvider));
+        } catch (error) {
+          this.logger.warn("Failed to find files:", error);
+          return [];
+        }
+      },
+
+      readFileContent: async (info: FileRange): Promise<string | null> => {
+        const uri = chatPanelFilepathToLocalUri(info.filepath, this.gitProvider);
+        if (!uri) {
+          this.logger.warn(`Could not resolve URI from filepath: ${JSON.stringify(info.filepath)}`);
+          return null;
+        }
+        const document = await workspace.openTextDocument(uri);
+        return document.getText(chatPanelLocationToVSCodeRange(info.range) ?? undefined);
+      },
+      listSymbols: async (params: ListSymbolsParams): Promise<ListSymbolItem[]> => {
+        const { query } = params;
+        let { limit } = params;
+        const editor = window.activeTextEditor;
+
+        if (!editor) {
+          this.logger.warn("listActiveSymbols: No active editor found.");
+          return [];
+        }
+        if (!limit || limit < 0) {
+          limit = 20;
+        }
+
+        const getDocumentSymbols = async (editor: TextEditor): Promise<SymbolInformation[]> => {
+          this.logger.debug(`getDocumentSymbols: Fetching document symbols for ${editor.document.uri.toString()}`);
+          const symbols =
+            (await commands.executeCommand<DocumentSymbol[] | SymbolInformation[]>(
+              "vscode.executeDocumentSymbolProvider",
+              editor.document.uri,
+            )) || [];
+
+          const result: SymbolInformation[] = [];
+          const queue: (DocumentSymbol | SymbolInformation)[] = [...symbols];
+
+          // BFS to get all symbols up to the limit
+          while (queue.length > 0 && result.length < limit) {
+            const current = queue.shift();
+            if (!current) {
+              continue;
+            }
+
+            if (current instanceof DocumentSymbol) {
+              const converted = new SymbolInformation(
+                current.name,
+                current.kind,
+                current.detail,
+                new Location(editor.document.uri, current.range),
+              );
+
+              result.push(converted);
+
+              if (result.length >= limit) {
+                break;
+              }
+
+              queue.push(...current.children);
+            } else {
+              result.push(current);
+
+              if (result.length >= limit) {
+                break;
+              }
+            }
+          }
+
+          this.logger.debug(`getDocumentSymbols: Found ${result.length} symbols.`);
+          return result;
+        };
+
+        const getWorkspaceSymbols = async (query: string): Promise<ListSymbolItem[]> => {
+          this.logger.debug(`getWorkspaceSymbols: Fetching workspace symbols for query "${query}"`);
+          try {
+            const symbols =
+              (await commands.executeCommand<SymbolInformation[]>("vscode.executeWorkspaceSymbolProvider", query)) ||
+              [];
+
+            const items = symbols.map((symbol) => ({
+              filepath: localUriToChatPanelFilepath(symbol.location.uri, this.gitProvider),
+              range: vscodeRangeToChatPanelLineRange(symbol.location.range),
+              label: symbol.name,
+            }));
+            this.logger.debug(`getWorkspaceSymbols: Found ${items.length} symbols.`);
+            return items;
+          } catch (error) {
+            this.logger.error(`Workspace symbols failed: ${error}`);
+            return [];
+          }
+        };
+
+        const filterSymbols = (symbols: SymbolInformation[], query: string): SymbolInformation[] => {
+          const lowerQuery = query.toLowerCase();
+          const filtered = symbols.filter(
+            (s) => s.name.toLowerCase().includes(lowerQuery) || s.containerName?.toLowerCase().includes(lowerQuery),
+          );
+          this.logger.debug(`filterSymbols: Filtered down to ${filtered.length} symbols with query "${query}"`);
+          return filtered;
+        };
+
+        const mergeResults = (
+          local: ListSymbolItem[],
+          workspace: ListSymbolItem[],
+          query: string,
+          limit = 20,
+        ): ListSymbolItem[] => {
+          this.logger.debug(
+            `mergeResults: Merging ${local.length} local symbols and ${workspace.length} workspace symbols with query "${query}" and limit ${limit}`,
+          );
+
+          const seen = new Set<string>();
+          const allItems = [...local, ...workspace];
+          const uniqueItems: ListSymbolItem[] = [];
+
+          for (const item of allItems) {
+            const key = `${item.filepath}-${item.label}-${item.range.start}-${item.range.end}`;
+            if (!seen.has(key)) {
+              seen.add(key);
+              uniqueItems.push(item);
+            }
+          }
+
+          // Sort all items by the match score
+          const getMatchScore = (label: string): number => {
+            const lowerLabel = label.toLowerCase();
+            const lowerQuery = query.toLowerCase();
+
+            if (lowerLabel === lowerQuery) return 3;
+            if (lowerLabel.startsWith(lowerQuery)) return 2;
+            if (lowerLabel.includes(lowerQuery)) return 1;
+            return 0;
+          };
+
+          uniqueItems.sort((a, b) => {
+            const scoreA = getMatchScore(a.label);
+            const scoreB = getMatchScore(b.label);
+
+            if (scoreB !== scoreA) return scoreB - scoreA;
+            return a.label.length - b.label.length;
+          });
+
+          this.logger.debug(`mergeResults: Returning ${Math.min(uniqueItems.length, limit)} sorted symbols.`);
+          return uniqueItems.slice(0, limit);
+        };
+
+        const symbolToItem = (symbol: SymbolInformation, filepath: Filepath): ListSymbolItem => {
+          return {
+            filepath,
+            range: vscodeRangeToChatPanelLineRange(symbol.location.range),
+            label: symbol.name,
+          };
+        };
+
+        try {
+          this.logger.info("listActiveSymbols: Starting to fetch symbols.");
+          const defaultSymbols = await getDocumentSymbols(editor);
+          const filepath = localUriToChatPanelFilepath(editor.document.uri, this.gitProvider);
+
+          if (!query) {
+            const items = defaultSymbols.slice(0, limit).map((symbol) => symbolToItem(symbol, filepath));
+            this.logger.debug(`listActiveSymbols: Returning ${items.length} symbols.`);
+            return items;
+          }
+
+          const [filteredDefault, workspaceSymbols] = await Promise.all([
+            Promise.resolve(filterSymbols(defaultSymbols, query)),
+            getWorkspaceSymbols(query),
+          ]);
+          this.logger.info(
+            `listActiveSymbols: Found ${filteredDefault.length} filtered local symbols and ${workspaceSymbols.length} workspace symbols.`,
+          );
+
+          const mergedItems = mergeResults(
+            filteredDefault.map((s) => symbolToItem(s, filepath)),
+            workspaceSymbols,
+            query,
+            limit,
+          );
+          this.logger.info(`listActiveSymbols: Returning ${mergedItems.length} merged symbols.`);
+          return mergedItems;
+        } catch (error) {
+          this.logger.error(`listActiveSymbols: Failed - ${error}`);
+          return [];
+        }
       },
     });
   }
@@ -652,14 +906,29 @@ export class ChatWebview {
   }
 
   private async notifyActiveEditorSelectionChange(editor: TextEditor | undefined) {
+    if (editor && editor.document.uri.scheme === "output") {
+      // do not update when the active editor is an output channel
+      return;
+    }
+
     if (!editor || !isValidForSyncActiveEditorSelection(editor)) {
       await this.client?.updateActiveSelection(null);
       return;
     }
 
-    const fileContext = await getFileContextFromSelection(editor, this.gitProvider);
+    const fileContext = await getEditorContext(editor, this.gitProvider);
     await this.client?.updateActiveSelection(fileContext);
   }
+
+  private debouncedNotifyActiveEditorSelectionChange = debounce(async (editor: TextEditor | undefined) => {
+    await this.notifyActiveEditorSelectionChange(editor);
+  }, 100);
+
+  private findFiles = wrapCancelableFunction(
+    findFiles,
+    (args) => args[1]?.token,
+    (args, token) => [args[0], { ...args[1], token }] as Parameters<typeof findFiles>,
+  );
 
   private getColorThemeString() {
     switch (window.activeColorTheme.kind) {
