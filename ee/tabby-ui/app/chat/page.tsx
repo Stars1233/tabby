@@ -29,6 +29,7 @@ import { MemoizedReactMarkdown } from '@/components/markdown'
 import './page.css'
 
 import { saveFetcherOptions } from '@/lib/tabby/token-management'
+import { PromptFormRef } from '@/components/chat/form-editor/types'
 
 const convertToHSLColor = (style: string) => {
   return Color(style)
@@ -64,21 +65,12 @@ export default function ChatPage() {
   const chatRef = useRef<ChatRef>(null)
   const { width } = useWindowSize()
   const prevWidthRef = useRef(width)
-  const chatInputRef = useRef<HTMLTextAreaElement>(null)
+  const chatInputRef = useRef<PromptFormRef>(null)
 
   const searchParams = useSearchParams()
   const client = searchParams.get('client') as ClientType
   const isInEditor = !!client || undefined
   const useMacOSKeyboardEventHandler = useRef<boolean>()
-
-  // server feature support check
-  const [supportsOnApplyInEditorV2, setSupportsOnApplyInEditorV2] =
-    useState(false)
-  const [supportsOnLookupSymbol, setSupportsOnLookupSymbol] = useState(false)
-  const [
-    supportsReadWorkspaceGitRepoInfo,
-    setSupportsReadWorkspaceGitRepoInfo
-  ] = useState(false)
 
   const executeCommand = (command: ChatCommand) => {
     if (chatRef.current) {
@@ -236,19 +228,7 @@ export default function ChatPage() {
         apiVersion: TABBY_CHAT_PANEL_API_VERSION
       })
 
-      const checkCapabilities = async () => {
-        server
-          ?.hasCapability('onApplyInEditorV2')
-          .then(setSupportsOnApplyInEditorV2)
-        server?.hasCapability('lookupSymbol').then(setSupportsOnLookupSymbol)
-        server
-          ?.hasCapability('readWorkspaceGitRepositories')
-          .then(setSupportsReadWorkspaceGitRepoInfo)
-      }
-
-      checkCapabilities().then(() => {
-        setIsServerLoaded(true)
-      })
+      setIsServerLoaded(true)
     }
   }, [server])
 
@@ -302,6 +282,14 @@ export default function ChatPage() {
 
   const getActiveEditorSelection = async () => {
     return server?.getActiveEditorSelection() ?? null
+  }
+
+  const fetchSessionState = async () => {
+    return server?.fetchSessionState?.() ?? null
+  }
+
+  const storeSessionState = async (state: Record<string, any>) => {
+    return server?.storeSessionState?.(state)
   }
 
   const refresh = async () => {
@@ -398,6 +386,9 @@ export default function ChatPage() {
     )
   }
 
+  const supportsStoreAndFetchSessionState =
+    server?.storeSessionState && server?.fetchSessionState
+
   return (
     <ErrorBoundary FallbackComponent={ErrorBoundaryFallback}>
       <Chat
@@ -410,23 +401,24 @@ export default function ChatPage() {
         onCopyContent={isInEditor && server?.onCopy}
         onApplyInEditor={
           isInEditor &&
-          (supportsOnApplyInEditorV2
+          (server?.onApplyInEditorV2
             ? server?.onApplyInEditorV2
             : server?.onApplyInEditor)
         }
-        supportsOnApplyInEditorV2={supportsOnApplyInEditorV2}
-        onLookupSymbol={
-          isInEditor &&
-          (supportsOnLookupSymbol ? server?.lookupSymbol : undefined)
-        }
+        supportsOnApplyInEditorV2={!!server?.onApplyInEditorV2}
+        onLookupSymbol={isInEditor && server?.lookupSymbol}
         openInEditor={openInEditor}
         openExternal={openExternal}
-        readWorkspaceGitRepositories={
-          supportsReadWorkspaceGitRepoInfo
-            ? server?.readWorkspaceGitRepositories
-            : undefined
-        }
+        readWorkspaceGitRepositories={server?.readWorkspaceGitRepositories}
         getActiveEditorSelection={getActiveEditorSelection}
+        fetchSessionState={
+          supportsStoreAndFetchSessionState ? fetchSessionState : undefined
+        }
+        storeSessionState={
+          supportsStoreAndFetchSessionState ? storeSessionState : undefined
+        }
+        listFileInWorkspace={isInEditor && server?.listFileInWorkspace}
+        readFileContent={isInEditor && server?.readFileContent}
       />
     </ErrorBoundary>
   )

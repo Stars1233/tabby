@@ -8,8 +8,20 @@ import {
   Maybe,
   MessageAttachmentClientCode
 } from '@/lib/gql/generates/graphql'
-import { AttachmentCodeItem, AttachmentDocItem, FileContext } from '@/lib/types'
-import { cn } from '@/lib/utils'
+import {
+  AttachmentCodeItem,
+  AttachmentDocItem,
+  FileContext,
+  RelevantCodeContext
+} from '@/lib/types'
+import {
+  cn,
+  convertFilepath,
+  encodeMentionPlaceHolder,
+  getFilepathFromContext,
+  getRangeFromAttachmentCode,
+  resolveFileNameForDisplay
+} from '@/lib/utils'
 import {
   HoverCard,
   HoverCardContent,
@@ -19,19 +31,24 @@ import { MemoizedReactMarkdown } from '@/components/markdown'
 
 import './style.css'
 
+import { SquareFunctionIcon } from 'lucide-react'
 import {
   FileLocation,
   Filepath,
+  ListSymbolItem,
   LookupSymbolHint,
   SymbolInfo
 } from 'tabby-chat-panel/index'
 
 import {
   MARKDOWN_CITATION_REGEX,
-  MARKDOWN_SOURCE_REGEX
+  MARKDOWN_FILE_REGEX,
+  MARKDOWN_SOURCE_REGEX,
+  MARKDOWN_SYMBOL_REGEX
 } from '@/lib/constants/regex'
 
 import { Mention } from '../mention-tag'
+import { IconFile } from '../ui/icons'
 import { Skeleton } from '../ui/skeleton'
 import { CodeElement } from './code'
 import { DocDetailView } from './doc-detail-view'
@@ -162,6 +179,27 @@ export function MessageMarkdown({
       const className = headline ? 'text-[1rem] font-semibold' : undefined
       return { sourceId, className }
     })
+    processMatches(MARKDOWN_FILE_REGEX, FileTag, (match: string) => {
+      const encodedFilepath = match[1]
+      try {
+        return {
+          encodedFilepath,
+          openInEditor
+        }
+      } catch (e) {}
+    })
+
+    processMatches(
+      MARKDOWN_SYMBOL_REGEX,
+      SymbolTag,
+      (match: RegExpExecArray) => {
+        const fullMatch = match[1]
+        return {
+          encodedSymbol: fullMatch,
+          openInEditor
+        }
+      }
+    )
 
     addTextNode(text.slice(lastIndex))
 
@@ -175,26 +213,8 @@ export function MessageMarkdown({
     setSymbolLocationMap(map => new Map(map.set(keyword, undefined)))
     const hints: LookupSymbolHint[] = []
     if (activeSelection && activeSelection?.range) {
-      // FIXME(@icycodes): this is intended to convert the filepath to Filepath type
-      // We should remove this after FileContext.filepath use type Filepath instead of string
-      let filepath: Filepath
-      if (
-        activeSelection.git_url.length > 1 &&
-        !activeSelection.filepath.includes(':')
-      ) {
-        filepath = {
-          kind: 'git',
-          filepath: activeSelection.filepath,
-          gitUrl: activeSelection.git_url
-        }
-      } else {
-        filepath = {
-          kind: 'uri',
-          uri: activeSelection.filepath
-        }
-      }
       hints.push({
-        filepath,
+        filepath: getFilepathFromContext(activeSelection),
         location: {
           start: activeSelection.range.start,
           end: activeSelection.range.end
@@ -204,6 +224,10 @@ export function MessageMarkdown({
     const symbolInfo = await onLookupSymbol(keyword, hints)
     setSymbolLocationMap(map => new Map(map.set(keyword, symbolInfo)))
   }
+
+  const encodedMessage = useMemo(() => {
+    return encodeMentionPlaceHolder(message)
+  }, [message])
 
   return (
     <MessageMarkdownContext.Provider
@@ -235,6 +259,7 @@ export function MessageMarkdown({
         components={{
           p({ children }) {
             return (
+              // FIXME
               <p className="mb-2 last:mb-0">
                 {children.map((child, index) =>
                   typeof child === 'string' ? (
@@ -272,10 +297,13 @@ export function MessageMarkdown({
                 {children}
               </CodeElement>
             )
+          },
+          hr() {
+            return null
           }
         }}
       >
-        {message}
+        {encodedMessage}
       </MemoizedReactMarkdown>
     </MessageMarkdownContext.Provider>
   )
@@ -377,6 +405,104 @@ function SourceTag({
   )
 }
 
+function FileTag({
+  encodedFilepath,
+  openInEditor,
+  className
+}: {
+  encodedFilepath: string | undefined
+  className?: string
+  openInEditor?: MessageMarkdownProps['openInEditor']
+}) {
+  const filepath = useMemo(() => {
+    if (!encodedFilepath) return null
+    try {
+      const decodedFilepath = decodeURIComponent(encodedFilepath)
+      const filepath = JSON.parse(decodedFilepath) as Filepath
+      return filepath
+    } catch (e) {
+      return null
+    }
+  }, [encodedFilepath])
+
+  const filepathString = useMemo(() => {
+    if (!filepath) return undefined
+
+    return convertFilepath(filepath).filepath
+  }, [filepath])
+
+  const handleClick = () => {
+    if (!openInEditor || !filepath) return
+    openInEditor({ filepath })
+  }
+
+  if (!filepathString) return null
+
+  return (
+    <span
+      className={cn(
+        'symbol space-x-1 whitespace-nowrap border bg-muted py-0.5 align-middle leading-5',
+        className,
+        {
+          'hover:bg-muted/50 cursor-pointer': !!openInEditor && !!filepath
+        }
+      )}
+      onClick={handleClick}
+    >
+      <IconFile className="relative -top-px inline-block h-3.5 w-3.5" />
+      <span className={cn('whitespace-normal font-medium')}>
+        {resolveFileNameForDisplay(filepathString)}
+      </span>
+    </span>
+  )
+}
+
+function SymbolTag({
+  encodedSymbol,
+  openInEditor,
+  className
+}: {
+  encodedSymbol: string | undefined
+  className?: string
+  openInEditor?: MessageMarkdownProps['openInEditor']
+}) {
+  const symbol = useMemo(() => {
+    if (!encodedSymbol) return null
+    try {
+      const decodedSymbol = decodeURIComponent(encodedSymbol)
+      return JSON.parse(decodedSymbol) as ListSymbolItem
+    } catch (e) {
+      return null
+    }
+  }, [encodedSymbol])
+
+  const handleClick = () => {
+    if (!openInEditor || !symbol) return
+    openInEditor({
+      filepath: symbol.filepath,
+      location: symbol.range
+    })
+  }
+
+  if (!symbol?.label) return null
+
+  return (
+    <span
+      className={cn(
+        'symbol space-x-1 whitespace-nowrap border bg-muted py-0.5 align-middle leading-5',
+        className,
+        {
+          'hover:bg-muted/50 cursor-pointer': !!openInEditor
+        }
+      )}
+      onClick={handleClick}
+    >
+      <SquareFunctionIcon className="relative -top-px inline-block h-3.5 w-3.5" />
+      <span className="font-medium">{symbol.label}</span>
+    </span>
+  )
+}
+
 function RelevantDocumentBadge({
   relevantDocument,
   citationIndex
@@ -414,20 +540,73 @@ function RelevantCodeBadge({
     onCodeCitationMouseLeave
   } = useContext(MessageMarkdownContext)
 
+  const context: RelevantCodeContext = useMemo(() => {
+    return {
+      kind: 'file',
+      range: getRangeFromAttachmentCode(relevantCode),
+      filepath: relevantCode.filepath || '',
+      content: relevantCode.content,
+      git_url: ''
+    }
+  }, [relevantCode])
+
+  const isMultiLine =
+    context.range &&
+    !isNil(context.range?.start) &&
+    !isNil(context.range?.end) &&
+    context.range.start < context.range.end
+  const pathSegments = context.filepath.split('/')
+  const path = pathSegments.slice(0, pathSegments.length - 1).join('/')
+
+  const fileName = useMemo(() => {
+    return resolveFileNameForDisplay(context.filepath)
+  }, [context.filepath])
+
+  const rangeText = useMemo(() => {
+    if (!context.range) return undefined
+
+    let text = ''
+    if (context.range.start) {
+      text = String(context.range.start)
+    }
+    if (isMultiLine) {
+      text += `-${context.range.end}`
+    }
+    return text
+  }, [context.range])
+
   return (
-    <span
-      className="relative -top-2 mr-0.5 inline-block h-4 w-4 cursor-pointer rounded-full bg-muted text-center text-xs font-medium"
-      onClick={() => {
-        onCodeCitationClick?.(relevantCode)
-      }}
-      onMouseEnter={() => {
-        onCodeCitationMouseEnter?.(citationIndex)
-      }}
-      onMouseLeave={() => {
-        onCodeCitationMouseLeave?.(citationIndex)
-      }}
-    >
-      {citationIndex}
-    </span>
+    <HoverCard openDelay={100} closeDelay={100}>
+      <HoverCardTrigger>
+        <span
+          className="relative -top-2 mr-0.5 inline-block h-4 w-4 cursor-pointer rounded-full bg-muted text-center text-xs font-medium"
+          onClick={() => {
+            onCodeCitationClick?.(relevantCode)
+          }}
+          onMouseEnter={() => {
+            onCodeCitationMouseEnter?.(citationIndex)
+          }}
+          onMouseLeave={() => {
+            onCodeCitationMouseLeave?.(citationIndex)
+          }}
+        >
+          {citationIndex}
+        </span>
+      </HoverCardTrigger>
+      <HoverCardContent className="w-auto bg-background text-sm text-foreground dark:border-muted-foreground/60 lg:w-96">
+        <div
+          className="cursor-pointer space-y-2 whitespace-nowrap hover:opacity-70"
+          onClick={() => onCodeCitationClick?.(relevantCode)}
+        >
+          <span>{fileName}</span>
+          {rangeText ? (
+            <span className="text-muted-foreground">:{rangeText}</span>
+          ) : null}
+          {!!path && (
+            <div className="text-xs text-muted-foreground">{path}</div>
+          )}
+        </div>
+      </HoverCardContent>
+    </HoverCard>
   )
 }
