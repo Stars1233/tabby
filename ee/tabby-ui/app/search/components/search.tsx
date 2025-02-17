@@ -429,7 +429,23 @@ export function Search() {
       }
     }
 
+    // FIXME(jueliang) process FileList
+
     currentAssistantMessage.threadRelevantQuestions = answer?.relevantQuestions
+
+    // update assiatant message status
+    if ('isReadingCode' in answer) {
+      currentAssistantMessage.isReadingCode = answer.isReadingCode
+    }
+    if ('isReadingFileList' in answer) {
+      currentAssistantMessage.isReadingFileList = answer.isReadingFileList
+    }
+    if ('isReadingDocs' in answer) {
+      currentAssistantMessage.isReadingDocs = answer.isReadingDocs
+    }
+
+    // update expose steps
+    currentAssistantMessage.readingCode = answer?.readingCode
 
     // update message pair ids
     const newUserMessageId = answer.userMessageId
@@ -502,6 +518,9 @@ export function Search() {
   }, [devPanelOpen])
 
   const onSubmitSearch = (question: string, ctx?: ThreadRunContexts) => {
+    const { sourceIdForCodeQuery, sourceIdsForDocQuery, searchPublic } =
+      getSourceInputs(selectedRepository?.sourceId, ctx)
+
     const newUserMessageId = tempNanoId()
     const newAssistantMessageId = tempNanoId()
     const newUserMessage: ConversationMessage = {
@@ -512,11 +531,9 @@ export function Search() {
     const newAssistantMessage: ConversationMessage = {
       id: newAssistantMessageId,
       role: Role.Assistant,
-      content: ''
+      content: '',
+      codeSourceId: sourceIdForCodeQuery
     }
-
-    const { sourceIdForCodeQuery, sourceIdsForDocQuery, searchPublic } =
-      getSourceInputs(selectedRepository?.sourceId, ctx)
 
     const codeQuery: InputMaybe<CodeQueryInput> = sourceIdForCodeQuery
       ? { sourceId: sourceIdForCodeQuery, content: question }
@@ -560,6 +577,11 @@ export function Search() {
 
     const newMessages = messages.slice(0, -2)
     const userMessage = messages[userMessageIndex]
+    const assistantMessage = messages[assistantMessageIndex]
+
+    const codeSourceId =
+      assistantMessage?.codeSourceId || selectedRepository?.sourceId
+
     const newUserMessage: ConversationMessage = {
       ...userMessage,
       id: tempNanoId()
@@ -568,6 +590,7 @@ export function Search() {
       id: tempNanoId(),
       role: Role.Assistant,
       content: '',
+      codeSourceId,
       attachment: {
         code: null,
         doc: null,
@@ -582,10 +605,7 @@ export function Search() {
     )
 
     const { sourceIdForCodeQuery, sourceIdsForDocQuery, searchPublic } =
-      getSourceInputs(
-        selectedRepository?.sourceId,
-        getThreadRunContextsFromMentions(mentions)
-      )
+      getSourceInputs(codeSourceId, getThreadRunContextsFromMentions(mentions))
 
     const codeQuery: InputMaybe<CodeQueryInput> = sourceIdForCodeQuery
       ? { sourceId: sourceIdForCodeQuery, content: newUserMessage.content }
@@ -752,6 +772,7 @@ export function Search() {
             <Header
               threadIdFromURL={threadIdFromURL}
               streamingDone={!isLoading}
+              threadId={threadId}
             />
             <LoadingWrapper
               loading={!isReady}
@@ -784,6 +805,7 @@ export function Search() {
                                 key={pair.answer.id}
                                 className="pb-8 pt-2"
                                 message={pair.answer}
+                                userMessage={pair.question}
                                 clientCode={
                                   pair.question?.attachment?.clientCode
                                 }

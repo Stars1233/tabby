@@ -5,7 +5,9 @@ import type { MouseEvent } from 'react'
 import { useRouter } from 'next/navigation'
 import { toast } from 'sonner'
 
+import { useEnablePage } from '@/lib/experiment-flags'
 import { graphql } from '@/lib/gql/generates'
+import { updatePendingThreadId } from '@/lib/stores/page-store'
 import { clearHomeScrollPosition } from '@/lib/stores/scroll-store'
 import { useMutation } from '@/lib/tabby/gql'
 import {
@@ -43,13 +45,20 @@ const deleteThreadMutation = graphql(/* GraphQL */ `
 type HeaderProps = {
   threadIdFromURL?: string
   streamingDone?: boolean
+  threadId?: string
 }
 
-export function Header({ threadIdFromURL, streamingDone }: HeaderProps) {
+export function Header({
+  threadIdFromURL,
+  streamingDone,
+  threadId
+}: HeaderProps) {
   const router = useRouter()
   const { isThreadOwner } = useContext(SearchContext)
   const [deleteAlertVisible, setDeleteAlertVisible] = useState(false)
   const [isDeleting, setIsDeleting] = useState(false)
+
+  const [enablePage] = useEnablePage()
 
   const deleteThread = useMutation(deleteThreadMutation, {
     onCompleted(data) {
@@ -81,6 +90,12 @@ export function Header({ threadIdFromURL, streamingDone }: HeaderProps) {
     router.push('/')
   }
 
+  const onConvertToPage = () => {
+    if (!threadId) return
+    updatePendingThreadId(threadId)
+    router.push('/pages')
+  }
+
   return (
     <header className="flex h-16 items-center justify-between px-4 lg:px-10">
       <div className="flex items-center gap-x-6">
@@ -103,6 +118,7 @@ export function Header({ threadIdFromURL, streamingDone }: HeaderProps) {
             <IconPlus />
           </Button>
         )}
+
         {streamingDone && threadIdFromURL && isThreadOwner && (
           <AlertDialog
             open={deleteAlertVisible}
@@ -135,6 +151,11 @@ export function Header({ threadIdFromURL, streamingDone }: HeaderProps) {
               </AlertDialogFooter>
             </AlertDialogContent>
           </AlertDialog>
+        )}
+        {!!enablePage.value && streamingDone && isThreadOwner && threadId && (
+          <Button variant="ghost" onClick={onConvertToPage} className="gap-1">
+            Convert to page
+          </Button>
         )}
         <ClientOnly>
           <ThemeToggle />
