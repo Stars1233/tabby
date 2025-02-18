@@ -1,10 +1,14 @@
 use anyhow::{bail, Result};
 use chrono::{DateTime, Duration, Utc};
-use serde::{Deserialize, Serialize};
 use sqlx::{query, query_as, types::Json, FromRow};
 use tabby_db_macros::query_paged_as;
 
-use crate::{AsSqliteDateTimeString, DbConn};
+use crate::{
+    attachment::{
+        Attachment, AttachmentClientCode, AttachmentCode, AttachmentCodeFileList, AttachmentDoc,
+    },
+    AsSqliteDateTimeString, DbConn,
+};
 
 #[derive(FromRow)]
 pub struct ThreadDAO {
@@ -24,73 +28,15 @@ pub struct ThreadMessageDAO {
     pub content: String,
 
     pub code_source_id: Option<String>,
+    pub attachment: Option<Json<Attachment>>,
 
-    pub code_attachments: Option<Json<Vec<ThreadMessageAttachmentCode>>>,
-    pub client_code_attachments: Option<Json<Vec<ThreadMessageAttachmentClientCode>>>,
-    pub doc_attachments: Option<Json<Vec<ThreadMessageAttachmentDoc>>>,
-
+    // Deprecated since 0.25 (not removed from db yet).
+    // FIXME(meng): remove these columns from db in 0.26.
+    // pub code_attachments: Option<Json<Vec<AttachmentCode>>>,
+    // pub client_code_attachments: Option<Json<Vec<AttachmentClientCode>>>,
+    // pub doc_attachments: Option<Json<Vec<AttachmentDoc>>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(untagged)] // Mark the serde serialization format as untagged for backward compatibility: https://serde.rs/enum-representations.html#untagged
-pub enum ThreadMessageAttachmentDoc {
-    Web(ThreadMessageAttachmentWebDoc),
-    Issue(ThreadMessageAttachmentIssueDoc),
-    Pull(ThreadMessageAttachmentPullDoc),
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct ThreadMessageAttachmentWebDoc {
-    pub title: String,
-    pub link: String,
-    pub content: String,
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct ThreadMessageAttachmentIssueDoc {
-    pub title: String,
-    pub link: String,
-    pub author_user_id: Option<String>,
-    pub body: String,
-    pub closed: bool,
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct ThreadMessageAttachmentPullDoc {
-    pub title: String,
-    pub link: String,
-    pub author_user_id: Option<String>,
-    pub body: String,
-    pub diff: String,
-    pub merged: bool,
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct ThreadMessageAttachmentAuthor {
-    pub id: String,
-    pub name: String,
-    pub email: String,
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct ThreadMessageAttachmentCode {
-    pub git_url: String,
-    pub commit: Option<String>,
-    pub language: String,
-    pub filepath: String,
-    pub content: String,
-
-    /// When start line is `None`, it represents the entire file.
-    pub start_line: Option<usize>,
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct ThreadMessageAttachmentClientCode {
-    pub filepath: Option<String>,
-    pub start_line: Option<usize>,
-    pub content: String,
 }
 
 impl DbConn {
@@ -186,9 +132,9 @@ impl DbConn {
         thread_id: i64,
         role: &str,
         content: &str,
-        code_attachments: Option<&[ThreadMessageAttachmentCode]>,
-        client_code_attachments: Option<&[ThreadMessageAttachmentClientCode]>,
-        doc_attachments: Option<&[ThreadMessageAttachmentDoc]>,
+        code_attachments: Option<&[AttachmentCode]>,
+        client_code_attachments: Option<&[AttachmentClientCode]>,
+        doc_attachments: Option<&[AttachmentDoc]>,
         verify_last_message_role: bool,
     ) -> Result<i64> {
         if verify_last_message_role {
@@ -208,10 +154,8 @@ impl DbConn {
                 thread_id,
                 role,
                 content,
-                code_attachments,
-                client_code_attachments,
-                doc_attachments
-            ) VALUES (?, ?, ?, ?, ?, ?)"#,
+                attachment
+            ) VALUES (?, ?, ?, JSON_OBJECT('code', JSON(?), 'client_code', JSON(?), 'doc', JSON(?)))"#,
             thread_id,
             role,
             content,
@@ -225,16 +169,49 @@ impl DbConn {
         Ok(res.last_insert_rowid())
     }
 
+    pub async fn update_thread_message_code_file_list_attachment(
+        &self,
+        message_id: i64,
+        file_list: &[String],
+    ) -> Result<()> {
+        let code_file_list_attachment = Json(AttachmentCodeFileList {
+            file_list: file_list.into(),
+        });
+        query!(
+            "UPDATE thread_messages SET attachment = JSON_SET(attachment, '$.code_file_list', JSON(?)), updated_at = DATETIME('now') WHERE id = ?",
+            code_file_list_attachment,
+            message_id
+        )
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
     pub async fn update_thread_message_code_attachments(
         &self,
         message_id: i64,
-        code_source_id: &str,
-        code_attachments: &[ThreadMessageAttachmentCode],
+        code_attachments: &[AttachmentCode],
     ) -> Result<()> {
         let code_attachments = Json(code_attachments);
         query!(
-            "UPDATE thread_messages SET code_attachments = ?, code_source_id = ?, updated_at = DATETIME('now') WHERE id = ?",
+            "UPDATE thread_messages SET attachment = JSON_SET(attachment, '$.code', JSON(?)), updated_at = DATETIME('now') WHERE id = ?",
             code_attachments,
+            message_id
+        )
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    pub async fn update_thread_message_code_source_id(
+        &self,
+        message_id: i64,
+        code_source_id: &str,
+    ) -> Result<()> {
+        query!(
+            "UPDATE thread_messages SET code_source_id = ?, updated_at = DATETIME('now') WHERE id = ?",
             code_source_id,
             message_id
         )
@@ -247,11 +224,11 @@ impl DbConn {
     pub async fn update_thread_message_doc_attachments(
         &self,
         message_id: i64,
-        doc_attachments: &[ThreadMessageAttachmentDoc],
+        doc_attachments: &[AttachmentDoc],
     ) -> Result<()> {
         let doc_attachments = Json(doc_attachments);
         query!(
-            "UPDATE thread_messages SET doc_attachments = ?, updated_at = DATETIME('now') WHERE id = ?",
+            "UPDATE thread_messages SET attachment = JSON_SET(attachment, '$.doc', JSON(?)), updated_at = DATETIME('now') WHERE id = ?",
             doc_attachments,
             message_id
         )
@@ -304,9 +281,7 @@ impl DbConn {
                 role,
                 content,
                 code_source_id,
-                code_attachments as "code_attachments: Json<Vec<ThreadMessageAttachmentCode>>",
-                client_code_attachments as "client_code_attachments: Json<Vec<ThreadMessageAttachmentClientCode>>",
-                doc_attachments as "doc_attachments: Json<Vec<ThreadMessageAttachmentDoc>>",
+                attachment as "attachment: Json<Attachment>",
                 created_at as "created_at: DateTime<Utc>",
                 updated_at as "updated_at: DateTime<Utc>"
             FROM thread_messages
@@ -338,9 +313,7 @@ impl DbConn {
                 "role",
                 "content",
                 "code_source_id",
-                "code_attachments" as "code_attachments: Json<Vec<ThreadMessageAttachmentCode>>",
-                "client_code_attachments" as "client_code_attachments: Json<Vec<ThreadMessageAttachmentClientCode>>",
-                "doc_attachments" as "doc_attachments: Json<Vec<ThreadMessageAttachmentDoc>>",
+                "attachment" as "attachment: Json<Attachment>",
                 "created_at" as "created_at: DateTime<Utc>",
                 "updated_at" as "updated_at: DateTime<Utc>"
             ],

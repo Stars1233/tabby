@@ -195,12 +195,32 @@ export function getPromptForChatCommand(command: ChatCommand) {
   }
 }
 
+export const convertFilepath = (filepath: Filepath) => {
+  if (filepath.kind === 'git') {
+    return {
+      filepath: filepath.filepath,
+      git_url: filepath.gitUrl
+    }
+  }
+  if (filepath.kind === 'workspace') {
+    return {
+      filepath: filepath.filepath,
+      baseDir: filepath.baseDir,
+      git_url: ''
+    }
+  }
+  return {
+    filepath: filepath.uri,
+    git_url: ''
+  }
+}
+
 export function convertEditorContext(
   editorContext: EditorContext
 ): FileContext {
   const convertRange = (range: LineRange | PositionRange | undefined) => {
     // If the range is not provided, the whole file is considered.
-    if (!range) {
+    if (!range || typeof range.start === 'undefined') {
       return undefined
     }
 
@@ -212,20 +232,6 @@ export function convertEditorContext(
     return {
       start: positionRange.start.line,
       end: positionRange.end.line
-    }
-  }
-
-  const convertFilepath = (filepath: Filepath) => {
-    if (filepath.kind === 'uri') {
-      return {
-        filepath: filepath.uri,
-        git_url: ''
-      }
-    }
-
-    return {
-      filepath: filepath.filepath,
-      git_url: filepath.gitUrl
     }
   }
 
@@ -244,11 +250,21 @@ export function getFilepathFromContext(context: FileContext): Filepath {
       filepath: context.filepath,
       gitUrl: context.git_url
     }
-  } else {
+  }
+  if (
+    context.baseDir &&
+    context.baseDir.length > 1 &&
+    !context.filepath.includes(':')
+  ) {
     return {
-      kind: 'uri',
-      uri: context.filepath
+      kind: 'workspace',
+      filepath: context.filepath,
+      baseDir: context.baseDir
     }
+  }
+  return {
+    kind: 'uri',
+    uri: context.filepath
   }
 }
 

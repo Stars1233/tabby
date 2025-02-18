@@ -9,6 +9,7 @@ pub mod interface;
 pub mod job;
 pub mod license;
 pub mod notification;
+pub mod page;
 pub mod repository;
 pub mod setting;
 pub mod thread;
@@ -44,6 +45,7 @@ use juniper::{
 };
 use ldap3::result::LdapError;
 use notification::NotificationService;
+use page::ThreadToPageRunStream;
 use repository::RepositoryGrepOutput;
 use strum::IntoEnumIterator;
 use tabby_common::{
@@ -71,6 +73,7 @@ use self::{
     integration::{Integration, IntegrationKind, IntegrationService},
     job::JobStats,
     license::{IsLicenseValid, LicenseInfo, LicenseService, LicenseType},
+    page::PageService,
     repository::{
         CreateIntegrationInput, FileEntrySearchResult, ProvidedRepository, Repository,
         RepositoryKind, RepositoryService, UpdateIntegrationInput,
@@ -105,6 +108,7 @@ pub trait ServiceLocator: Send + Sync {
     fn user_event(&self) -> Arc<dyn UserEventService>;
     fn web_documents(&self) -> Arc<dyn WebDocumentService>;
     fn thread(&self) -> Arc<dyn ThreadService>;
+    fn page(&self) -> Option<Arc<dyn PageService>>;
     fn context(&self) -> Arc<dyn ContextService>;
     fn user_group(&self) -> Arc<dyn UserGroupService>;
     fn access_policy(&self) -> Arc<dyn AccessPolicyService>;
@@ -277,6 +281,7 @@ impl Query {
     /// List users, accessible for all login users.
     async fn users(
         ctx: &Context,
+        ids: Option<Vec<ID>>,
         after: Option<String>,
         before: Option<String>,
         first: Option<i32>,
@@ -291,7 +296,7 @@ impl Query {
             |after, before, first, last| async move {
                 ctx.locator
                     .auth()
-                    .list_users(after, before, first, last)
+                    .list_users(ids, after, before, first, last)
                     .await
                     .map(|users| users.into_iter().map(UserValue::UserSecured).collect())
             },
@@ -696,6 +701,67 @@ impl Query {
         .await
     }
 
+    /// Read pages by page IDs.
+    async fn pages(
+        ctx: &Context,
+        ids: Option<Vec<ID>>,
+        after: Option<String>,
+        before: Option<String>,
+        first: Option<i32>,
+        last: Option<i32>,
+    ) -> Result<Connection<page::Page>> {
+        check_user(ctx).await?;
+
+        let page_service = if let Some(service) = ctx.locator.page() {
+            service
+        } else {
+            return Err(CoreError::Forbidden("Page service is not enabled"));
+        };
+
+        relay::query_async(
+            after,
+            before,
+            first,
+            last,
+            |after, before, first, last| async move {
+                page_service
+                    .list(ids.as_deref(), after, before, first, last)
+                    .await
+            },
+        )
+        .await
+    }
+
+    async fn page_sections(
+        ctx: &Context,
+        page_id: ID,
+        after: Option<String>,
+        before: Option<String>,
+        first: Option<i32>,
+        last: Option<i32>,
+    ) -> Result<Connection<page::Section>> {
+        check_user(ctx).await?;
+
+        let page_service = if let Some(service) = ctx.locator.page() {
+            service
+        } else {
+            return Err(CoreError::Forbidden("Page service is not enabled"));
+        };
+
+        relay::query_async(
+            after,
+            before,
+            first,
+            last,
+            |after, before, first, last| async move {
+                page_service
+                    .list_sections(&page_id, after, before, first, last)
+                    .await
+            },
+        )
+        .await
+    }
+
     async fn custom_web_documents(
         ctx: &Context,
         ids: Option<Vec<ID>>,
@@ -779,7 +845,6 @@ impl Query {
                     let config = CompletionConfig::default();
                     let options = CompletionOptionsBuilder::default()
                         .max_decoding_tokens(config.max_decoding_tokens as i32)
-                        .max_input_length(config.max_input_length)
                         .sampling_temperature(0.1)
                         .seed(0)
                         .build()
@@ -835,6 +900,23 @@ impl Query {
                 }
             }
         }
+    }
+
+    async fn read_repository_related_questions(
+        ctx: &Context,
+        source_id: String,
+    ) -> Result<Vec<String>, CoreError> {
+        let user = check_user(ctx).await?;
+        ctx.locator
+            .repository()
+            .read_repository_related_questions(
+                ctx.locator
+                    .chat()
+                    .ok_or(CoreError::NotFound("The Chat didn't initialize yet"))?,
+                &user.policy,
+                source_id,
+            )
+            .await
     }
 }
 
@@ -1305,6 +1387,64 @@ impl Mutation {
         Ok(true)
     }
 
+    // page mutations
+
+    /// delete a page and all its sections.
+    async fn delete_page(ctx: &Context, id: ID) -> Result<bool> {
+        let user = check_user(ctx).await?;
+
+        let page_service = if let Some(service) = ctx.locator.page() {
+            service
+        } else {
+            return Err(CoreError::Forbidden("Page service is not enabled"));
+        };
+
+        let page = page_service.get(&id).await?;
+
+        user.policy.check_update_page(&page.author_id)?;
+        page_service.delete(&id).await.map(|_| true)
+    }
+
+    /// delete a single page section.
+    async fn delete_page_section(ctx: &Context, section_id: ID) -> Result<bool> {
+        let user = check_user(ctx).await?;
+
+        let page_service = if let Some(service) = ctx.locator.page() {
+            service
+        } else {
+            return Err(CoreError::Forbidden("Page service is not enabled"));
+        };
+        let section = page_service.get_section(&section_id).await?;
+
+        let page = page_service.get(&section.page_id).await?;
+        user.policy.check_update_page(&page.author_id)?;
+
+        page_service.delete_section(&section_id).await.map(|_| true)
+    }
+
+    async fn move_page_section(
+        ctx: &Context,
+        id: ID,
+        direction: page::MoveSectionDirection,
+    ) -> Result<bool> {
+        let user = check_user(ctx).await?;
+
+        let page_service = if let Some(service) = ctx.locator.page() {
+            service
+        } else {
+            return Err(CoreError::Forbidden("Page service is not enabled"));
+        };
+
+        let section = page_service.get_section(&id).await?;
+        let page = page_service.get(&section.page_id).await?;
+        user.policy.check_update_page(&page.author_id)?;
+
+        page_service
+            .move_section(&page.id, &id, direction)
+            .await
+            .map(|_| true)
+    }
+
     async fn create_custom_document(ctx: &Context, input: CreateCustomDocumentInput) -> Result<ID> {
         check_admin(ctx).await?;
         input.validate()?;
@@ -1502,6 +1642,27 @@ impl Subscription {
             false,
         )
         .await
+    }
+
+    /// Utilize an existing thread and its messages to create a page.
+    /// This will automatically generate:
+    /// - the page title and a summary of the content.
+    /// - a few sections based on the thread messages.
+    async fn create_thread_to_page_run(
+        ctx: &Context,
+        thread_id: ID,
+    ) -> Result<ThreadToPageRunStream> {
+        let user = check_user(ctx).await?;
+
+        let page_service = if let Some(service) = ctx.locator.page() {
+            service
+        } else {
+            return Err(CoreError::Forbidden("Page service is not enabled"));
+        };
+
+        page_service
+            .convert_thread_to_page(&user.policy, &user.id, &thread_id)
+            .await
     }
 }
 

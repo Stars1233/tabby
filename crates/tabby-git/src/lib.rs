@@ -21,6 +21,20 @@ pub async fn search_files(
     file_search::search(git2::Repository::open(root)?, rev, pattern, limit).await
 }
 
+pub struct ListFile {
+    pub files: Vec<GitFileSearch>,
+    pub truncated: bool,
+}
+
+pub async fn list_files(
+    root: &Path,
+    rev: Option<&str>,
+    limit: Option<usize>,
+) -> anyhow::Result<ListFile> {
+    let (files, truncated) = file_search::list(git2::Repository::open(root)?, rev, limit).await?;
+    Ok(ListFile { files, truncated })
+}
+
 pub async fn grep(
     root: &Path,
     rev: Option<&str>,

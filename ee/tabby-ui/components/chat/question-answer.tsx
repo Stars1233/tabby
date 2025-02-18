@@ -172,6 +172,7 @@ function UserMessageCard(props: { message: UserMessage }) {
             message={message.message}
             canWrapLongLines
             supportsOnApplyInEditorV2={supportsOnApplyInEditorV2}
+            openInEditor={openInEditor}
           />
           <div className="hidden md:block">
             <UserMessageCardActions {...props} />
@@ -299,6 +300,7 @@ function AssistantMessageCard(props: AssistantMessageCardProps) {
   const attachmentClientCode: Array<
     Omit<AttachmentCodeItem, '__typename' | 'startLine'> & {
       startLine: number | undefined
+      baseDir?: string
     }
   > = useMemo(() => {
     const formatedAttachmentClientCode =
@@ -306,6 +308,7 @@ function AssistantMessageCard(props: AssistantMessageCardProps) {
         content: o.content,
         filepath: o.filepath,
         gitUrl: o.git_url,
+        baseDir: o.baseDir,
         startLine: o.range ? o.range.start : undefined,
         language: filename2prism(o.filepath ?? '')[0],
         isClient: true
@@ -393,7 +396,7 @@ function AssistantMessageCard(props: AssistantMessageCardProps) {
           clientContexts={clientCode}
           onContextClick={onContextClick}
           showExternalLink={isInEditor}
-          isInEditor={isInEditor}
+          supportsOpenInEditor={!!openInEditor}
           showClientCodeIcon={!isInEditor}
           highlightIndex={relevantCodeHighlightIndex}
           triggerClassname="md:pt-0"

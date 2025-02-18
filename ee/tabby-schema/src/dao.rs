@@ -2,10 +2,10 @@ use anyhow::bail;
 use hash_ids::HashIds;
 use lazy_static::lazy_static;
 use tabby_db::{
-    EmailSettingDAO, IntegrationDAO, InvitationDAO, JobRunDAO, LdapCredentialDAO, NotificationDAO,
-    OAuthCredentialDAO, ServerSettingDAO, ThreadDAO, ThreadMessageAttachmentClientCode,
-    ThreadMessageAttachmentCode, ThreadMessageAttachmentDoc, ThreadMessageAttachmentIssueDoc,
-    ThreadMessageAttachmentPullDoc, ThreadMessageAttachmentWebDoc, UserEventDAO,
+    AttachmentClientCode, AttachmentCode, AttachmentCodeFileList, AttachmentDoc,
+    AttachmentIssueDoc, AttachmentPullDoc, AttachmentWebDoc, EmailSettingDAO, IntegrationDAO,
+    InvitationDAO, JobRunDAO, LdapCredentialDAO, NotificationDAO, OAuthCredentialDAO, PageDAO,
+    PageSectionDAO, ServerSettingDAO, ThreadDAO, UserEventDAO,
 };
 
 use crate::{
@@ -13,6 +13,7 @@ use crate::{
     integration::{Integration, IntegrationKind, IntegrationStatus},
     interface::UserValue,
     notification::{Notification, NotificationRecipient},
+    page,
     repository::RepositoryKind,
     schema::{
         auth::{self, LdapCredential, OAuthCredential, OAuthProvider},
@@ -219,8 +220,8 @@ impl From<NotificationDAO> for Notification {
     }
 }
 
-impl From<ThreadMessageAttachmentCode> for thread::MessageAttachmentCode {
-    fn from(value: ThreadMessageAttachmentCode) -> Self {
+impl From<AttachmentCode> for thread::MessageAttachmentCode {
+    fn from(value: AttachmentCode) -> Self {
         Self {
             git_url: value.git_url,
             commit: value.commit,
@@ -232,9 +233,9 @@ impl From<ThreadMessageAttachmentCode> for thread::MessageAttachmentCode {
     }
 }
 
-impl From<&thread::MessageAttachmentCode> for ThreadMessageAttachmentCode {
+impl From<&thread::MessageAttachmentCode> for AttachmentCode {
     fn from(val: &thread::MessageAttachmentCode) -> Self {
-        ThreadMessageAttachmentCode {
+        AttachmentCode {
             git_url: val.git_url.clone(),
             commit: val.commit.clone(),
             filepath: val.filepath.clone(),
@@ -245,8 +246,8 @@ impl From<&thread::MessageAttachmentCode> for ThreadMessageAttachmentCode {
     }
 }
 
-impl From<ThreadMessageAttachmentClientCode> for thread::MessageAttachmentClientCode {
-    fn from(value: ThreadMessageAttachmentClientCode) -> Self {
+impl From<AttachmentClientCode> for thread::MessageAttachmentClientCode {
+    fn from(value: AttachmentClientCode) -> Self {
         Self {
             filepath: value.filepath,
             content: value.content,
@@ -255,9 +256,9 @@ impl From<ThreadMessageAttachmentClientCode> for thread::MessageAttachmentClient
     }
 }
 
-impl From<&thread::MessageAttachmentCodeInput> for ThreadMessageAttachmentClientCode {
+impl From<&thread::MessageAttachmentCodeInput> for AttachmentClientCode {
     fn from(val: &thread::MessageAttachmentCodeInput) -> Self {
-        ThreadMessageAttachmentClientCode {
+        AttachmentClientCode {
             filepath: val.filepath.clone(),
             content: val.content.clone(),
             start_line: val.start_line.map(|x| x as usize),
@@ -265,19 +266,27 @@ impl From<&thread::MessageAttachmentCodeInput> for ThreadMessageAttachmentClient
     }
 }
 
+impl From<AttachmentCodeFileList> for thread::MessageAttachmentCodeFileList {
+    fn from(value: AttachmentCodeFileList) -> Self {
+        Self {
+            file_list: value.file_list,
+        }
+    }
+}
+
 pub fn from_thread_message_attachment_document(
-    doc: ThreadMessageAttachmentDoc,
+    doc: AttachmentDoc,
     author: Option<UserValue>,
 ) -> thread::MessageAttachmentDoc {
     match doc {
-        ThreadMessageAttachmentDoc::Web(web) => {
+        AttachmentDoc::Web(web) => {
             thread::MessageAttachmentDoc::Web(thread::MessageAttachmentWebDoc {
                 title: web.title,
                 link: web.link,
                 content: web.content,
             })
         }
-        ThreadMessageAttachmentDoc::Issue(issue) => {
+        AttachmentDoc::Issue(issue) => {
             thread::MessageAttachmentDoc::Issue(thread::MessageAttachmentIssueDoc {
                 title: issue.title,
                 link: issue.link,
@@ -286,7 +295,7 @@ pub fn from_thread_message_attachment_document(
                 closed: issue.closed,
             })
         }
-        ThreadMessageAttachmentDoc::Pull(pull) => {
+        AttachmentDoc::Pull(pull) => {
             thread::MessageAttachmentDoc::Pull(thread::MessageAttachmentPullDoc {
                 title: pull.title,
                 link: pull.link,
@@ -299,39 +308,33 @@ pub fn from_thread_message_attachment_document(
     }
 }
 
-impl From<&thread::MessageAttachmentDoc> for ThreadMessageAttachmentDoc {
+impl From<&thread::MessageAttachmentDoc> for AttachmentDoc {
     fn from(val: &thread::MessageAttachmentDoc) -> Self {
         match val {
-            thread::MessageAttachmentDoc::Web(val) => {
-                ThreadMessageAttachmentDoc::Web(ThreadMessageAttachmentWebDoc {
-                    title: val.title.clone(),
-                    link: val.link.clone(),
-                    content: val.content.clone(),
-                })
-            }
-            thread::MessageAttachmentDoc::Issue(val) => {
-                ThreadMessageAttachmentDoc::Issue(ThreadMessageAttachmentIssueDoc {
-                    title: val.title.clone(),
-                    link: val.link.clone(),
-                    author_user_id: val.author.as_ref().map(|x| match x {
-                        UserValue::UserSecured(user) => user.id.to_string(),
-                    }),
-                    body: val.body.clone(),
-                    closed: val.closed,
-                })
-            }
-            thread::MessageAttachmentDoc::Pull(val) => {
-                ThreadMessageAttachmentDoc::Pull(ThreadMessageAttachmentPullDoc {
-                    title: val.title.clone(),
-                    link: val.link.clone(),
-                    author_user_id: val.author.as_ref().map(|x| match x {
-                        UserValue::UserSecured(user) => user.id.to_string(),
-                    }),
-                    body: val.body.clone(),
-                    diff: val.patch.clone(),
-                    merged: val.merged,
-                })
-            }
+            thread::MessageAttachmentDoc::Web(val) => AttachmentDoc::Web(AttachmentWebDoc {
+                title: val.title.clone(),
+                link: val.link.clone(),
+                content: val.content.clone(),
+            }),
+            thread::MessageAttachmentDoc::Issue(val) => AttachmentDoc::Issue(AttachmentIssueDoc {
+                title: val.title.clone(),
+                link: val.link.clone(),
+                author_user_id: val.author.as_ref().map(|x| match x {
+                    UserValue::UserSecured(user) => user.id.to_string(),
+                }),
+                body: val.body.clone(),
+                closed: val.closed,
+            }),
+            thread::MessageAttachmentDoc::Pull(val) => AttachmentDoc::Pull(AttachmentPullDoc {
+                title: val.title.clone(),
+                link: val.link.clone(),
+                author_user_id: val.author.as_ref().map(|x| match x {
+                    UserValue::UserSecured(user) => user.id.to_string(),
+                }),
+                body: val.body.clone(),
+                diff: val.patch.clone(),
+                merged: val.merged,
+            }),
         }
     }
 }
@@ -341,6 +344,33 @@ impl From<ThreadDAO> for thread::Thread {
         Self {
             id: value.id.as_id(),
             user_id: value.user_id.as_id(),
+            created_at: value.created_at,
+            updated_at: value.updated_at,
+        }
+    }
+}
+
+impl From<PageDAO> for page::Page {
+    fn from(value: PageDAO) -> Self {
+        Self {
+            id: value.id.as_id(),
+            author_id: value.author_id.as_id(),
+            title: value.title,
+            content: value.content,
+            created_at: value.created_at,
+            updated_at: value.updated_at,
+        }
+    }
+}
+
+impl From<PageSectionDAO> for page::Section {
+    fn from(value: PageSectionDAO) -> Self {
+        Self {
+            id: value.id.as_id(),
+            page_id: value.page_id.as_id(),
+            title: value.title,
+            position: value.position as i32,
+            content: value.content.unwrap_or_default(),
             created_at: value.created_at,
             updated_at: value.updated_at,
         }
